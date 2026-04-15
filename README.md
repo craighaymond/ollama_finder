@@ -31,21 +31,6 @@ python ollama_finder.py
 
 By default, Ollama only listens on `127.0.0.1`. To allow this script to find your Ollama server across your LAN, you **must** bind it to all network interfaces.
 
-### On macOS / Linux:
-```bash
-export OLLAMA_HOST=0.0.0.0
-ollama serve
-```
-
-### On Windows:
-1. Exit Ollama from the system tray.
-2. Open PowerShell and run:
-   ```powershell
-   $env:OLLAMA_HOST="0.0.0.0"
-   ollama serve
-   ```
-3. (Optional) Set `OLLAMA_HOST` as a permanent Environment Variable in your System Settings.
-
 ## How it Works
 
 1. **Phase 1: Fast Probe**: The script checks `localhost` and performs parallel mDNS and ARP-based discovery.
