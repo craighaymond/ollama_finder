@@ -307,6 +307,8 @@ if __name__ == "__main__":
         
         if target_ip:
             interact_with_ollama(target_ip)
+            print(f"\n[i] Command to set your server:")
+            print(f"set OLLAMA_HOST={target_ip}")
     else:
         print("\n[-] No Ollama servers found.")
         print("Tips: Ensure Ollama is running and OLLAMA_HOST=0.0.0.0 is set.")
