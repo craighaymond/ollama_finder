@@ -6,12 +6,21 @@ import json
 import time
 import subprocess
 import re
+import os
 from datetime import datetime, timezone
+
+# ANSI colors for visibility on most backgrounds
+CYAN = "\033[96m"
+GREEN = "\033[92m"
+RESET = "\033[0m"
 
 OLLAMA_PORT = 11434
 TIMEOUT = 1.5  # Faster timeout for initial probe
 MAX_THREADS = 100
 TEST_PROMPT = "Tell me a joke."
+
+if os.name == 'nt':
+    os.system('') # Enable ANSI support in Windows terminals
 
 def format_relative_time(iso_str):
     """Converts ISO date to relative string (e.g., 2d ago)."""
@@ -229,21 +238,39 @@ def interact_with_ollama(ip):
         print(f"[i] Testing: {target_model} | Context: {ctx_size} | Status: {mem_status}")
 
         # 3. Stream the generation
-        print(f"[>] Test Prompt: \"{TEST_PROMPT}\"")
+        print(f"[>] Test Prompt: \"{CYAN}{TEST_PROMPT}{RESET}\"")
         print("[<] LLM response: ", end="", flush=True)
 
         payload = {"model": target_model, "prompt": TEST_PROMPT, "stream": True}
         req = urllib.request.Request(f"{base_url}/generate", method="POST")
         req.add_header('Content-Type', 'application/json')
         
+        start_gen = time.time()
+        ttft = None
+        
+        print(GREEN, end="", flush=True)
         with urllib.request.urlopen(req, data=json.dumps(payload).encode('utf-8'), timeout=120) as res:
             for line in res:
                 if line:
+                    if ttft is None:
+                        ttft = time.time() - start_gen
                     chunk = json.loads(line.decode('utf-8'))
                     text = chunk.get("response", "")
                     print(text, end="", flush=True)
                     if chunk.get("done"):
-                        print()
+                        print(RESET)
+                        eval_count = chunk.get("eval_count", 0)
+                        eval_duration = chunk.get("eval_duration", 0)
+                        load_duration = chunk.get("load_duration", 0)
+                        prompt_eval_duration = chunk.get("prompt_eval_duration", 0)
+                        
+                        if eval_count > 0 and eval_duration > 0:
+                            tps = eval_count / (eval_duration / 1e9)
+                            print(f"\n[i] Performance:")
+                            print(f"    - TTFT:      {ttft:.2f}s")
+                            print(f"    - Generation: {tps:.2f} tokens/s")
+                            print(f"    - Load Time:  {load_duration/1e9:.2f}s")
+                            print(f"    - Prompt Eval: {prompt_eval_duration/1e9:.2f}s")
                         break
 
     except Exception as e:
