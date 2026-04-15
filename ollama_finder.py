@@ -152,43 +152,52 @@ def check_ip(ip):
     except Exception:
         return None
 
-    # If port is open, confirm it's Ollama and check for loaded models
-    status, _ = http_request(f"http://{ip}:{OLLAMA_PORT}/api/tags", timeout=TIMEOUT)
+    # Resolve hostname for "machine type" identification
+    hostname = ""
+    try:
+        resolved = socket.gethostbyaddr(ip)[0]
+        hostname = resolved.replace(".local", "").replace(".home", "").replace(".lan", "")
+    except Exception:
+        hostname = "Unknown Device"
+
+    # If port is open, confirm it's Ollama and fetch tags/models
+    status, data = http_request(f"http://{ip}:{OLLAMA_PORT}/api/tags", timeout=TIMEOUT)
     if status == 200:
+        # Get all available models (full objects)
+        models_list = sorted(data.get("models", []), key=lambda x: x.get("name", "").lower())
+        
+        # Get currently loaded models
         _, ps_data = http_request(f"http://{ip}:{OLLAMA_PORT}/api/ps", timeout=TIMEOUT)
         loaded = ""
         if ps_data and ps_data.get("models"):
             loaded = ps_data["models"][0]["name"]
-        return (ip, loaded)
+            
+        return (ip, loaded, hostname, models_list)
     return None
 
 def find_ollama_servers():
     """Aggressive, fully parallelized discovery."""
-    found_servers = {} # Use dict to handle duplicates: ip -> loaded_model
+    found_servers = {} # ip -> (loaded_model, hostname, [models])
     
     # 1. Localhost check is nearly instant
     res = check_ip("127.0.0.1")
     if res:
-        found_servers[res[0]] = res[1]
+        found_servers[res[0]] = (res[1], "Localhost", res[3])
 
     # 2. Parallel Gathering & Probing
     print("Searching via mDNS and ARP concurrently...")
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        # Start gathering candidates in background threads
         mdns_future = executor.submit(get_mdns_ips)
         arp_future = executor.submit(get_arp_ips)
-        
-        # Combine candidates as they arrive
         candidates = set(mdns_future.result()) | set(arp_future.result())
         
-        # Probe all candidates in parallel
         futures = {executor.submit(check_ip, ip): ip for ip in candidates}
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
             if res:
-                ip, loaded = res
-                found_servers[ip] = loaded
+                ip, loaded, hostname, all_models = res
+                found_servers[ip] = (loaded, hostname, all_models)
 
     # 3. Thorough Subnet Scan (Only if nothing found yet)
     if not found_servers:
@@ -202,8 +211,8 @@ def find_ollama_servers():
                     for future in concurrent.futures.as_completed(futures):
                         res = future.result()
                         if res:
-                            ip, loaded = res
-                            found_servers[ip] = loaded
+                            ip, loaded, hostname, all_models = res
+                            found_servers[ip] = (loaded, hostname, all_models)
     
     return sorted(found_servers.items())
 
@@ -228,16 +237,6 @@ def interact_with_ollama(ip):
             return
 
         print(f"\n[+] Server: {ip}{loaded_str}")
-        print(f"    {'Model':<25} | {'Params':>7} | {'Quant':>8} | {'Size':>7} | {'Pulled':>10}")
-        print("    " + "-" * 70)
-        for m in models_list:
-            name = m.get("name", "Unknown")
-            details = m.get("details", {})
-            params = details.get("parameter_size", "Unknown")
-            quant = details.get("quantization_level", "Unknown")
-            size_gb = m.get("size", 0) / (1024**3)
-            pulled = format_relative_time(m.get("modified_at", ""))
-            print(f"    - {name:<23} | {params:>7} | {quant:>8} | {size_gb:6.1f}GB | {pulled:>10}")
 
         if loaded_models:
             target_model = loaded_models[0]
@@ -309,23 +308,34 @@ if __name__ == "__main__":
     print(f"Done ({time.time() - start_time:.1f}s)")
 
     if found_ips:
-        target_ip = None
+        print(f"\nFound {len(found_ips)} server(s):")
+        for i, (ip, (loaded, hostname, models_list)) in enumerate(found_ips, 1):
+            machine_label = f" ({hostname})" if hostname else ""
+            loaded_label = f" [{loaded}]" if loaded else " [No model loaded]"
+            print(f"  {i}. {ip}{machine_label}{loaded_label}")
+            if models_list:
+                print(f"     {'Model':<25} | {'Params':>7} | {'Quant':>8} | {'Size':>7} | {'Pulled':>10}")
+                print("     " + "-" * 70)
+                for m in models_list:
+                    name = m.get("name", "Unknown")
+                    details = m.get("details", {})
+                    params = details.get("parameter_size", "Unknown")
+                    quant = details.get("quantization_level", "Unknown")
+                    size_gb = m.get("size", 0) / (1024**3)
+                    pulled = format_relative_time(m.get("modified_at", ""))
+                    print(f"     - {name:<23} | {params:>7} | {quant:>8} | {size_gb:6.1f}GB | {pulled:>10}")
+            else:
+                print("     No models found")
+            print("") # Spacer
+        
+        target_ip = found_ips[0][0]
         if len(found_ips) > 1:
-            print(f"\nFound {len(found_ips)} servers:")
-            for i, (ip, loaded) in enumerate(found_ips, 1):
-                label = " (Localhost)" if ip == "127.0.0.1" else ""
-                loaded_label = f" [Loaded: {loaded}]" if loaded else ""
-                print(f"  {i}. {ip}{label}{loaded_label}")
-            
             try:
-                choice = input(f"\nSelect server [1-{len(found_ips)}, default 1]: ").strip()
+                choice = input(f"Select server [1-{len(found_ips)}, default 1]: ").strip()
                 idx = int(choice)-1 if choice and 0 < int(choice) <= len(found_ips) else 0
                 target_ip = found_ips[idx][0]
             except (ValueError, KeyboardInterrupt, IndexError):
                 print("Using default.")
-                target_ip = found_ips[0][0]
-        else:
-            target_ip = found_ips[0][0]
         
         if target_ip:
             interact_with_ollama(target_ip)
