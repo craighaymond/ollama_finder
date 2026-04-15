@@ -188,7 +188,7 @@ def interact_with_ollama(ip):
 
         # 3. Stream the generation
         print(f"[>] Prompt: \"{TEST_PROMPT}\"")
-        print("[<] Response: ", end="", flush=True)
+        print("[<] LLM response: ", end="", flush=True)
 
         payload = {"model": target_model, "prompt": TEST_PROMPT, "stream": True}
         req = urllib.request.Request(f"{base_url}/generate", method="POST")
