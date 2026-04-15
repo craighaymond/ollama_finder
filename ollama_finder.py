@@ -121,19 +121,24 @@ def check_ip(ip):
     except Exception:
         return None
 
-    # If port is open, confirm it's Ollama via HTTP
+    # If port is open, confirm it's Ollama and check for loaded models
     status, _ = http_request(f"http://{ip}:{OLLAMA_PORT}/api/tags", timeout=TIMEOUT)
     if status == 200:
-        return ip
+        _, ps_data = http_request(f"http://{ip}:{OLLAMA_PORT}/api/ps", timeout=TIMEOUT)
+        loaded = ""
+        if ps_data and ps_data.get("models"):
+            loaded = ps_data["models"][0]["name"]
+        return (ip, loaded)
     return None
 
 def find_ollama_servers():
     """Aggressive, fully parallelized discovery."""
-    found_servers = set()
+    found_servers = {} # Use dict to handle duplicates: ip -> loaded_model
     
     # 1. Localhost check is nearly instant
-    if check_ip("127.0.0.1"):
-        found_servers.add("127.0.0.1")
+    res = check_ip("127.0.0.1")
+    if res:
+        found_servers[res[0]] = res[1]
 
     # 2. Parallel Gathering & Probing
     print("Searching via mDNS and ARP concurrently...")
@@ -151,7 +156,8 @@ def find_ollama_servers():
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
             if res:
-                found_servers.add(res)
+                ip, loaded = res
+                found_servers[ip] = loaded
 
     # 3. Thorough Subnet Scan (Only if nothing found yet)
     if not found_servers:
@@ -165,16 +171,21 @@ def find_ollama_servers():
                     for future in concurrent.futures.as_completed(futures):
                         res = future.result()
                         if res:
-                            found_servers.add(res)
+                            ip, loaded = res
+                            found_servers[ip] = loaded
     
-    return sorted(list(found_servers))
+    return sorted(found_servers.items())
 
 def interact_with_ollama(ip):
     """Lists models, checks memory/context status, and streams a test prompt."""
     base_url = f"http://{ip}:{OLLAMA_PORT}/api"
     
     try:
-        # 1. Get available models
+        # 1. Get available models and currently loaded models
+        _, ps_data = http_request(f"{base_url}/ps", timeout=5)
+        loaded_models = [m['name'] for m in ps_data.get("models", [])] if ps_data else []
+        loaded_str = f" (Loaded: {', '.join(loaded_models)})" if loaded_models else ""
+
         status, data = http_request(f"{base_url}/tags", timeout=5)
         if status != 200 or not data:
             print(f"[-] Failed to connect to {ip} (Status: {status})")
@@ -185,7 +196,7 @@ def interact_with_ollama(ip):
             print(f"[!] No models found on {ip}")
             return
 
-        print(f"\n[+] Server: {ip}")
+        print(f"\n[+] Server: {ip}{loaded_str}")
         print(f"    {'Model':<25} | {'Params':>7} | {'Quant':>8} | {'Size':>7} | {'Pulled':>10}")
         print("    " + "-" * 70)
         for m in models_list:
@@ -199,9 +210,8 @@ def interact_with_ollama(ip):
 
         target_model = models_list[0]["name"]
         
-        # 2. Get Model Details & Memory Status in parallel-ish logic
+        # 2. Get Model Details & Memory Status
         _, show_data = http_request(f"{base_url}/show", method="POST", data={"name": target_model}, timeout=5)
-        _, ps_data = http_request(f"{base_url}/ps", timeout=5)
         
         # Parse context
         ctx_size = "Default"
@@ -209,13 +219,12 @@ def interact_with_ollama(ip):
             ctx_match = re.search(r"num_ctx\s+(\d+)", show_data.get("parameters", ""))
             if ctx_match: ctx_size = ctx_match.group(1)
 
-        # Parse memory status and VRAM usage
+        # Parse memory status and VRAM usage for the target model
         mem_status = "Not Loaded"
-        if ps_data:
-            loaded_info = next((m for m in ps_data.get("models", []) if m['name'] == target_model), None)
-            if loaded_info:
-                vram_gb = loaded_info.get("size_vram", 0) / (1024**3)
-                mem_status = f"Loaded (VRAM: {vram_gb:.1f}GB)"
+        loaded_info = next((m for m in ps_data.get("models", []) if m['name'] == target_model), None) if ps_data else None
+        if loaded_info:
+            vram_gb = loaded_info.get("size_vram", 0) / (1024**3)
+            mem_status = f"Loaded (VRAM: {vram_gb:.1f}GB)"
             
         print(f"[i] Testing: {target_model} | Context: {ctx_size} | Status: {mem_status}")
 
@@ -251,18 +260,20 @@ if __name__ == "__main__":
         target_ip = None
         if len(found_ips) > 1:
             print(f"\nFound {len(found_ips)} servers:")
-            for i, ip in enumerate(found_ips, 1):
+            for i, (ip, loaded) in enumerate(found_ips, 1):
                 label = " (Localhost)" if ip == "127.0.0.1" else ""
-                print(f"  {i}. {ip}{label}")
+                loaded_label = f" [Loaded: {loaded}]" if loaded else ""
+                print(f"  {i}. {ip}{label}{loaded_label}")
             
             try:
                 choice = input(f"\nSelect server [1-{len(found_ips)}, default 1]: ").strip()
-                target_ip = found_ips[int(choice)-1] if choice and 0 < int(choice) <= len(found_ips) else found_ips[0]
+                idx = int(choice)-1 if choice and 0 < int(choice) <= len(found_ips) else 0
+                target_ip = found_ips[idx][0]
             except (ValueError, KeyboardInterrupt, IndexError):
                 print("Using default.")
-                target_ip = found_ips[0]
+                target_ip = found_ips[0][0]
         else:
-            target_ip = found_ips[0]
+            target_ip = found_ips[0][0]
         
         if target_ip:
             interact_with_ollama(target_ip)
