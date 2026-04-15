@@ -56,6 +56,25 @@ def http_request(url, method="GET", data=None, timeout=5):
     except Exception:
         return None, None
 
+def is_virtual_ip(ip):
+    """Checks if an IP is likely a virtual interface (Docker, WSL, etc.)."""
+    parts = ip.split('.')
+    if len(parts) != 4: return False
+    
+    # 172.16.0.0 - 172.31.255.255 (Common for Docker/WSL/Private)
+    if parts[0] == "172":
+        try:
+            second = int(parts[1])
+            return 16 <= second <= 31
+        except ValueError:
+            return False
+            
+    # 169.254.x.x (APIPA / Link-local)
+    if parts[0] == "169" and parts[1] == "254":
+        return True
+        
+    return False
+
 def get_local_subnets():
     """Finds all local subnets from active network interfaces."""
     subnets = set()
@@ -65,7 +84,8 @@ def get_local_subnets():
         try:
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
-            subnets.add(".".join(ip.split(".")[:-1]))
+            if not is_virtual_ip(ip):
+                subnets.add(".".join(ip.split(".")[:-1]))
         except Exception:
             pass
         finally:
@@ -75,7 +95,7 @@ def get_local_subnets():
         hostname = socket.gethostname()
         for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
             ip = info[4][0]
-            if not ip.startswith("127."):
+            if not ip.startswith("127.") and not is_virtual_ip(ip):
                 subnets.add(".".join(ip.split(".")[:-1]))
     except Exception:
         pass
@@ -89,9 +109,10 @@ def get_arp_ips():
         output = subprocess.check_output(["arp", "-a"]).decode("ascii", errors="ignore")
         found = re.findall(r"(\d+\.\d+\.\d+\.\d+)", output)
         for ip in found:
-            # Filter out multicast, broadcast, and loopback
+            # Filter out multicast, broadcast, loopback, and virtual IPs
             if not (ip.startswith("224.") or ip.startswith("239.") or 
-                    ip.startswith("127.") or ip.endswith(".255") or ip == "255.255.255.255"):
+                    ip.startswith("127.") or ip.endswith(".255") or 
+                    ip == "255.255.255.255" or is_virtual_ip(ip)):
                 ips.add(ip)
     except Exception:
         pass
@@ -108,7 +129,8 @@ def get_mdns_ips():
     
     def resolve(name):
         try:
-            return socket.gethostbyname(name)
+            ip = socket.gethostbyname(name)
+            return ip if not is_virtual_ip(ip) else None
         except Exception:
             return None
 
