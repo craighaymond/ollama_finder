@@ -217,7 +217,10 @@ def interact_with_ollama(ip):
             pulled = format_relative_time(m.get("modified_at", ""))
             print(f"    - {name:<23} | {params:>7} | {quant:>8} | {size_gb:6.1f}GB | {pulled:>10}")
 
-        target_model = models_list[0]["name"]
+        if loaded_models:
+            target_model = loaded_models[0]
+        else:
+            target_model = models_list[0]["name"]
         
         # 2. Get Model Details & Memory Status
         _, show_data = http_request(f"{base_url}/show", method="POST", data={"name": target_model}, timeout=5)
