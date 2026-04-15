@@ -6,11 +6,30 @@ import json
 import time
 import subprocess
 import re
+from datetime import datetime, timezone
 
 OLLAMA_PORT = 11434
 TIMEOUT = 1.5  # Faster timeout for initial probe
 MAX_THREADS = 100
-TEST_PROMPT = "Greet me with a joke."
+TEST_PROMPT = "Tell me a joke."
+
+def format_relative_time(iso_str):
+    """Converts ISO date to relative string (e.g., 2d ago)."""
+    try:
+        # Ollama returns "2024-05-14T10:11:12.123456789Z"
+        # We need to strip the sub-second part for standard Python parsing
+        base_time = iso_str.split(".")[0]
+        dt = datetime.strptime(base_time, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        diff = datetime.now(timezone.utc) - dt
+        
+        if diff.days > 365: return f"{diff.days // 365}y ago"
+        if diff.days > 30: return f"{diff.days // 30}mo ago"
+        if diff.days > 0: return f"{diff.days}d ago"
+        if diff.seconds > 3600: return f"{diff.seconds // 3600}h ago"
+        if diff.seconds > 60: return f"{diff.seconds // 60}m ago"
+        return "just now"
+    except Exception:
+        return "unknown"
 
 def http_request(url, method="GET", data=None, timeout=5):
     """Zero-dependency HTTP request helper."""
@@ -161,14 +180,24 @@ def interact_with_ollama(ip):
             print(f"[-] Failed to connect to {ip} (Status: {status})")
             return
 
-        models = [m['name'] for m in data.get("models", [])]
-        if not models:
+        models_list = sorted(data.get("models", []), key=lambda x: x.get("name", "").lower())
+        if not models_list:
             print(f"[!] No models found on {ip}")
             return
 
-        print(f"\n[+] Server: {ip} | Models: {', '.join(models)}")
+        print(f"\n[+] Server: {ip}")
+        print(f"    {'Model':<25} | {'Params':>7} | {'Quant':>8} | {'Size':>7} | {'Pulled':>10}")
+        print("    " + "-" * 70)
+        for m in models_list:
+            name = m.get("name", "Unknown")
+            details = m.get("details", {})
+            params = details.get("parameter_size", "Unknown")
+            quant = details.get("quantization_level", "Unknown")
+            size_gb = m.get("size", 0) / (1024**3)
+            pulled = format_relative_time(m.get("modified_at", ""))
+            print(f"    - {name:<23} | {params:>7} | {quant:>8} | {size_gb:6.1f}GB | {pulled:>10}")
 
-        target_model = models[0]
+        target_model = models_list[0]["name"]
         
         # 2. Get Model Details & Memory Status in parallel-ish logic
         _, show_data = http_request(f"{base_url}/show", method="POST", data={"name": target_model}, timeout=5)
@@ -180,14 +209,18 @@ def interact_with_ollama(ip):
             ctx_match = re.search(r"num_ctx\s+(\d+)", show_data.get("parameters", ""))
             if ctx_match: ctx_size = ctx_match.group(1)
 
-        # Parse memory status
-        loaded_models = [m['name'] for m in ps_data.get("models", [])] if ps_data else []
-        mem_status = "Loaded" if target_model in loaded_models else "Not Loaded"
+        # Parse memory status and VRAM usage
+        mem_status = "Not Loaded"
+        if ps_data:
+            loaded_info = next((m for m in ps_data.get("models", []) if m['name'] == target_model), None)
+            if loaded_info:
+                vram_gb = loaded_info.get("size_vram", 0) / (1024**3)
+                mem_status = f"Loaded (VRAM: {vram_gb:.1f}GB)"
             
         print(f"[i] Testing: {target_model} | Context: {ctx_size} | Status: {mem_status}")
 
         # 3. Stream the generation
-        print(f"[>] Prompt: \"{TEST_PROMPT}\"")
+        print(f"[>] Test Prompt: \"{TEST_PROMPT}\"")
         print("[<] LLM response: ", end="", flush=True)
 
         payload = {"model": target_model, "prompt": TEST_PROMPT, "stream": True}
