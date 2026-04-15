@@ -22,6 +22,18 @@ TEST_PROMPT = "Tell me a joke."
 if os.name == 'nt':
     os.system('') # Enable ANSI support in Windows terminals
 
+def parse_params(param_str):
+    """Converts '8.0B' or '307M' to a float for sorting."""
+    if not param_str: return 0.0
+    try:
+        match = re.search(r"(\d+\.?\d*)", param_str)
+        if not match: return 0.0
+        num = float(match.group(1))
+        if 'B' in param_str.upper(): return num * 1000
+        return num
+    except Exception:
+        return 0.0
+
 def format_relative_time(iso_str):
     """Converts ISO date to relative string (e.g., 2d ago)."""
     try:
@@ -163,14 +175,20 @@ def check_ip(ip):
     # If port is open, confirm it's Ollama and fetch tags/models
     status, data = http_request(f"http://{ip}:{OLLAMA_PORT}/api/tags", timeout=TIMEOUT)
     if status == 200:
-        # Get all available models (full objects)
-        models_list = sorted(data.get("models", []), key=lambda x: x.get("name", "").lower())
+        models_list = data.get("models", [])
         
         # Get currently loaded models
         _, ps_data = http_request(f"http://{ip}:{OLLAMA_PORT}/api/ps", timeout=TIMEOUT)
         loaded = ""
         if ps_data and ps_data.get("models"):
             loaded = ps_data["models"][0]["name"]
+            
+        # Developer-First Sorting: Loaded First, then Family, then Size (Desc)
+        models_list.sort(key=lambda x: (
+            x.get("name") != loaded,
+            x.get("details", {}).get("family", "").lower(),
+            -parse_params(x.get("details", {}).get("parameter_size", "0B"))
+        ))
             
         return (ip, loaded, hostname, models_list)
     return None
@@ -231,7 +249,14 @@ def interact_with_ollama(ip):
             print(f"[-] Failed to connect to {ip} (Status: {status})")
             return
 
-        models_list = sorted(data.get("models", []), key=lambda x: x.get("name", "").lower())
+        models_list = data.get("models", [])
+        # Developer-First Sorting: Loaded First, then Family, then Size (Desc)
+        models_list.sort(key=lambda x: (
+            x.get("name") not in loaded_models,
+            x.get("details", {}).get("family", "").lower(),
+            -parse_params(x.get("details", {}).get("parameter_size", "0B"))
+        ))
+        
         if not models_list:
             print(f"[!] No models found on {ip}")
             return
@@ -241,7 +266,14 @@ def interact_with_ollama(ip):
         if loaded_models:
             target_model = loaded_models[0]
         else:
-            target_model = models_list[0]["name"]
+            # Find the first model that isn't an embedding model (common candidates: bert, nomic, embedding)
+            target_model = next(
+                (m["name"] for m in models_list 
+                 if "embedding" not in m["name"].lower() 
+                 and "bert" not in m["name"].lower()
+                 and "nomic" not in m["name"].lower()), 
+                models_list[0]["name"]
+            )
         
         # 2. Get Model Details & Memory Status
         _, show_data = http_request(f"{base_url}/show", method="POST", data={"name": target_model}, timeout=5)
@@ -314,16 +346,17 @@ if __name__ == "__main__":
             loaded_label = f" [{loaded}]" if loaded else " [No model loaded]"
             print(f"  {i}. {ip}{machine_label}{loaded_label}")
             if models_list:
-                print(f"     {'Model':<25} | {'Params':>7} | {'Quant':>8} | {'Size':>7} | {'Pulled':>10}")
-                print("     " + "-" * 70)
+                print(f"     {'Model':<25} | {'Params':>7} | {'Quant':>8} | {'Size':>7}  | {'VRAM Est':>10}")
+                print("     " + "-" * 75)
                 for m in models_list:
                     name = m.get("name", "Unknown")
                     details = m.get("details", {})
                     params = details.get("parameter_size", "Unknown")
                     quant = details.get("quantization_level", "Unknown")
                     size_gb = m.get("size", 0) / (1024**3)
-                    pulled = format_relative_time(m.get("modified_at", ""))
-                    print(f"     - {name:<23} | {params:>7} | {quant:>8} | {size_gb:6.1f}GB | {pulled:>10}")
+                    vram_est = size_gb * 1.1 # Rough estimate (Model + 10% overhead)
+                    prefix = "*" if name == loaded else "-"
+                    print(f"     {prefix} {name:<23} | {params:>7} | {quant:>8} | {size_gb:6.1f}GB | {vram_est:8.1f}GB")
             else:
                 print("     No models found")
             print("") # Spacer
