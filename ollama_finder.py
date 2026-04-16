@@ -361,14 +361,24 @@ if __name__ == "__main__":
                 print("     No models found")
             print("") # Spacer
         
-        target_ip = found_ips[0][0]
-        if len(found_ips) > 1:
-            try:
-                choice = input(f"Select server [1-{len(found_ips)}, default 1]: ").strip()
-                idx = int(choice)-1 if choice and 0 < int(choice) <= len(found_ips) else 0
-                target_ip = found_ips[idx][0]
-            except (ValueError, KeyboardInterrupt, IndexError):
+        target_ip = None
+        try:
+            if len(found_ips) > 1:
+                choice = input(f"Select server to test [1-{len(found_ips)}, q to quit, default 1]: ").strip().lower()
+            else:
+                choice = input(f"Test server {found_ips[0][0]}? [Y/q, default Y]: ").strip().lower()
+
+            if choice in ['q', 'quit', 'n']:
+                print("Exiting.")
+            elif not choice or choice in ['y', 'yes']:
+                target_ip = found_ips[0][0]
+            elif choice.isdigit() and 1 <= int(choice) <= len(found_ips):
+                target_ip = found_ips[int(choice)-1][0]
+            else:
                 print("Using default.")
+                target_ip = found_ips[0][0]
+        except (ValueError, KeyboardInterrupt):
+            print("\nExiting.")
         
         if target_ip:
             interact_with_ollama(target_ip)
