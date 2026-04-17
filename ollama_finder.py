@@ -382,8 +382,13 @@ if __name__ == "__main__":
         
         if target_ip:
             interact_with_ollama(target_ip)
-            print(f"\n[i] Command to set your server:")
-            print(f"set OLLAMA_HOST={target_ip}")
+        
+        # Always show how to set the environment variable for the selected or first server
+        final_ip = target_ip if target_ip else found_ips[0][0]
+        print(f"\n[i] Command to set your server ({final_ip}):")
+        print(f"(cmd prompt) set OLLAMA_HOST={final_ip}")
+        print(f"(PowerShell) $env:OLLAMA_HOST=\"{final_ip}\"")
+        print("")
     else:
         print("\n[-] No Ollama servers found.")
         print("Tips: Ensure Ollama is running and OLLAMA_HOST=0.0.0.0 is set.")
