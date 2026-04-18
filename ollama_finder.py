@@ -7,6 +7,7 @@ import time
 import subprocess
 import re
 import os
+import sys
 from datetime import datetime, timezone
 
 # ANSI colors for visibility on most backgrounds
@@ -21,6 +22,29 @@ TEST_PROMPT = "Tell me a joke."
 
 if os.name == 'nt':
     os.system('') # Enable ANSI support in Windows terminals
+
+def get_keypress():
+    """Reads a single keypress without requiring Enter."""
+    if os.name == 'nt':
+        import msvcrt
+        try:
+            char = msvcrt.getch()
+            if char in [b'\x00', b'\xe0']:
+                msvcrt.getch() # Skip second byte of special keys
+                return ""
+            return char.decode('utf-8', errors='ignore')
+        except Exception:
+            return ""
+    else:
+        import tty, termios
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            char = sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        return char
 
 def parse_params(param_str):
     """Converts '8.0B' or '307M' to a float for sorting."""
@@ -285,7 +309,7 @@ def interact_with_ollama(ip):
             if ctx_match: ctx_size = ctx_match.group(1)
 
         # Parse memory status and VRAM usage for the target model
-        mem_status = "Not Loaded"
+        mem_status = "Not Loaded (Expect extra delay)"
         loaded_info = next((m for m in ps_data.get("models", []) if m['name'] == target_model), None) if ps_data else None
         if loaded_info:
             vram_gb = loaded_info.get("size_vram", 0) / (1024**3)
@@ -364,13 +388,18 @@ if __name__ == "__main__":
         target_ip = None
         try:
             if len(found_ips) > 1:
-                choice = input(f"Select server to test [1-{len(found_ips)}, q to quit, default 1]: ").strip().lower()
+                print(f"Select server to test [1-{len(found_ips)}, q to quit, default 1]: ", end="", flush=True)
             else:
-                choice = input(f"Test server {found_ips[0][0]}? [Y/q, default Y]: ").strip().lower()
+                print(f"Test server {found_ips[0][0]}? [Y/q, default Y]: ", end="", flush=True)
+            
+            choice = get_keypress().lower()
+            if choice in ['\r', '\n']:
+                choice = ""
+            print(choice)
 
-            if choice in ['q', 'quit', 'n']:
+            if choice in ['q', 'n']:
                 print("Exiting.")
-            elif not choice or choice in ['y', 'yes']:
+            elif not choice or choice in ['y']:
                 target_ip = found_ips[0][0]
             elif choice.isdigit() and 1 <= int(choice) <= len(found_ips):
                 target_ip = found_ips[int(choice)-1][0]
