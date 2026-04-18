@@ -13,12 +13,13 @@ from datetime import datetime, timezone
 # ANSI colors for visibility on most backgrounds
 CYAN = "\033[96m"
 GREEN = "\033[92m"
+RED = "\033[91m"
 RESET = "\033[0m"
 
 OLLAMA_PORT = 11434
 TIMEOUT = 1.5  # Faster timeout for initial probe
 MAX_THREADS = 100
-TEST_PROMPT = "Tell me a joke."
+TEST_PROMPT = "Tell me a lesser-known fact in two sentences."
 
 if os.name == 'nt':
     os.system('') # Enable ANSI support in Windows terminals
@@ -232,14 +233,23 @@ def find_ollama_servers():
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         mdns_future = executor.submit(get_mdns_ips)
         arp_future = executor.submit(get_arp_ips)
-        candidates = set(mdns_future.result()) | set(arp_future.result())
+        candidates = list(set(mdns_future.result()) | set(arp_future.result()))
         
-        futures = {executor.submit(check_ip, ip): ip for ip in candidates}
-        for future in concurrent.futures.as_completed(futures):
-            res = future.result()
-            if res:
-                ip, loaded, hostname, all_models = res
-                found_servers[ip] = (loaded, hostname, all_models)
+        if candidates:
+            total_cand = len(candidates)
+            completed = 0
+            futures = {executor.submit(check_ip, ip): ip for ip in candidates}
+            for future in concurrent.futures.as_completed(futures):
+                completed += 1
+                percent = (completed / total_cand) * 100
+                print(f"\r  > Scanning the network: {percent:3.0f}% complete ", end="", flush=True)
+                res = future.result()
+                if res:
+                    ip, loaded, hostname, all_models = res
+                    found_servers[ip] = (loaded, hostname, all_models)
+            print() # New line after probing
+        else:
+            print("  > No mDNS or ARP candidates found.")
 
     # 3. Thorough Subnet Scan (Only if nothing found yet)
     if not found_servers:
@@ -249,14 +259,41 @@ def find_ollama_servers():
             with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
                 for subnet in subnets:
                     ips_to_check = [f"{subnet}.{i}" for i in range(1, 255)]
+                    total_ips = len(ips_to_check)
+                    completed = 0
+                    
                     futures = {executor.submit(check_ip, ip): ip for ip in ips_to_check}
                     for future in concurrent.futures.as_completed(futures):
+                        completed += 1
+                        # Update progress every 5 IPs or at completion
+                        if completed % 5 == 0 or completed == total_ips:
+                            percent = (completed / total_ips) * 100
+                            print(f"\r  > Scanning {subnet}.x: {percent:3.0f}% complete ", end="", flush=True)
+                        
                         res = future.result()
                         if res:
                             ip, loaded, hostname, all_models = res
                             found_servers[ip] = (loaded, hostname, all_models)
+                    print() # New line after each subnet
     
     return sorted(found_servers.items())
+
+def get_current_ollama_host():
+    """Retrieves OLLAMA_HOST and attempts to detect the shell type."""
+    host = os.environ.get('OLLAMA_HOST', 'Not Set')
+    
+    # Shell detection logic
+    shell_type = "Unknown"
+    if os.name == 'nt':
+        # PowerShell usually sets these, CMD does not
+        if os.environ.get('PSModulePath') or os.environ.get('POWERSHELL_DISTRIBUTION_CHANNEL'):
+            shell_type = "PowerShell"
+        else:
+            shell_type = "CMD"
+    else:
+        shell_type = os.environ.get('SHELL', 'Unix-like')
+
+    return host, shell_type
 
 def interact_with_ollama(ip):
     """Lists models, checks memory/context status, and streams a test prompt."""
@@ -309,7 +346,7 @@ def interact_with_ollama(ip):
             if ctx_match: ctx_size = ctx_match.group(1)
 
         # Parse memory status and VRAM usage for the target model
-        mem_status = "Not Loaded (Expect extra delay)"
+        mem_status = f"{RED}Not Loaded (Expect extra delay){RESET}"
         loaded_info = next((m for m in ps_data.get("models", []) if m['name'] == target_model), None) if ps_data else None
         if loaded_info:
             vram_gb = loaded_info.get("size_vram", 0) / (1024**3)
@@ -339,6 +376,8 @@ def interact_with_ollama(ip):
                     print(text, end="", flush=True)
                     if chunk.get("done"):
                         print(RESET)
+                        print(f"[i] Currently Loaded: {target_model}")
+                        
                         eval_count = chunk.get("eval_count", 0)
                         eval_duration = chunk.get("eval_duration", 0)
                         load_duration = chunk.get("load_duration", 0)
@@ -364,11 +403,21 @@ if __name__ == "__main__":
     print(f"Done ({time.time() - start_time:.1f}s)")
 
     if found_ips:
+        current_host_val, shell_type = get_current_ollama_host()
+        # Clean OLLAMA_HOST for comparison (remove protocol and port)
+        clean_current = current_host_val.replace("http://", "").replace("https://", "").split(":")[0]
+        if clean_current in ["localhost", "0.0.0.0", ""]: clean_current = "127.0.0.1"
+
         print(f"\nFound {len(found_ips)} server(s):")
         for i, (ip, (loaded, hostname, models_list)) in enumerate(found_ips, 1):
             machine_label = f" ({hostname})" if hostname else ""
             loaded_label = f" [{loaded}]" if loaded else " [No model loaded]"
-            print(f"  {i}. {ip}{machine_label}{loaded_label}")
+            
+            match_label = ""
+            if ip == clean_current:
+                match_label = f" - {CYAN}YOUR CURRENT SERVER{RESET}"
+                
+            print(f"  {i}. {ip}{machine_label}{loaded_label}{match_label}")
             if models_list:
                 print(f"     {'Model':<25} | {'Params':>7} | {'Quant':>8} | {'Size':>7}  | {'VRAM Est':>10}")
                 print("     " + "-" * 75)
@@ -386,11 +435,22 @@ if __name__ == "__main__":
             print("") # Spacer
         
         target_ip = None
+
+        # Determine the dynamic default based on the current OLLAMA_HOST
+        default_idx = 0
+        for idx, (ip, _) in enumerate(found_ips):
+            if ip == clean_current:
+                default_idx = idx
+                break
+        default_num = default_idx + 1
+
+        print(f"[i] Your current OLLAMA_HOST: {CYAN}{current_host_val}{RESET} ({shell_type})\n")
+
         try:
             if len(found_ips) > 1:
-                print(f"Select server to test [1-{len(found_ips)}, q to quit, default 1]: ", end="", flush=True)
+                print(f"Select server to test [1-{len(found_ips)}, q to quit, default {default_num}]: ", end="", flush=True)
             else:
-                print(f"Test server {found_ips[0][0]}? [Y/q, default Y]: ", end="", flush=True)
+                print(f"Test server {found_ips[default_idx][0]}? [Y/q, default Y]: ", end="", flush=True)
             
             choice = get_keypress().lower()
             if choice in ['\r', '\n']:
@@ -400,12 +460,12 @@ if __name__ == "__main__":
             if choice in ['q', 'n']:
                 print("Exiting.")
             elif not choice or choice in ['y']:
-                target_ip = found_ips[0][0]
+                target_ip = found_ips[default_idx][0]
             elif choice.isdigit() and 1 <= int(choice) <= len(found_ips):
                 target_ip = found_ips[int(choice)-1][0]
             else:
                 print("Using default.")
-                target_ip = found_ips[0][0]
+                target_ip = found_ips[default_idx][0]
         except (ValueError, KeyboardInterrupt):
             print("\nExiting.")
         
@@ -414,7 +474,7 @@ if __name__ == "__main__":
         
         # Always show how to set the environment variable for the selected or first server
         final_ip = target_ip if target_ip else found_ips[0][0]
-        print(f"\n[i] Command to set your server ({final_ip}):")
+        print(f"\n[i] Command to set your server environment variable:")
         print(f"(cmd prompt) set OLLAMA_HOST={final_ip}")
         print(f"(PowerShell) $env:OLLAMA_HOST=\"{final_ip}\"")
         print("")
